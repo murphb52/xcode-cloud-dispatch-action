@@ -49,6 +49,7 @@ COLOR_GREEN=""
 COLOR_YELLOW=""
 COLOR_RED=""
 COLOR_CYAN=""
+COLOR_MAGENTA=""
 
 setup_colors() {
   if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -61,6 +62,7 @@ setup_colors() {
     COLOR_YELLOW="$(printf '\033[33m')"
     COLOR_RED="$(printf '\033[31m')"
     COLOR_CYAN="$(printf '\033[36m')"
+    COLOR_MAGENTA="$(printf '\033[35m')"
   fi
 }
 
@@ -74,11 +76,17 @@ tty_println() {
 
 section() {
   tty_println ""
-  tty_println "${COLOR_BOLD}${COLOR_BLUE}== $* ==${COLOR_RESET}"
+  tty_println "${COLOR_BOLD}${COLOR_BLUE}============================================================${COLOR_RESET}"
+  tty_println "${COLOR_BOLD}${COLOR_BLUE}$*${COLOR_RESET}"
+  tty_println "${COLOR_BOLD}${COLOR_BLUE}============================================================${COLOR_RESET}"
 }
 
 success() {
   tty_println "${COLOR_GREEN}$*${COLOR_RESET}"
+}
+
+progress() {
+  tty_println "${COLOR_MAGENTA}${COLOR_BOLD}...${COLOR_RESET} ${COLOR_MAGENTA}$*${COLOR_RESET}"
 }
 
 die() {
@@ -110,7 +118,7 @@ prompt_line() {
   local prompt="$1"
   local value=""
   while true; do
-    tty_print "$prompt"
+    tty_print "${COLOR_BOLD}$prompt${COLOR_RESET}"
     IFS= read -r value </dev/tty || die "Unable to read from the terminal."
     value="$(trim "$value")"
     if [ -n "$value" ]; then
@@ -125,7 +133,7 @@ prompt_with_default() {
   local prompt="$1"
   local default_value="$2"
   local value=""
-  tty_print "$prompt [$default_value]: "
+  tty_print "${COLOR_BOLD}$prompt${COLOR_RESET} [$default_value] ${COLOR_DIM}(press Enter to keep this value)${COLOR_RESET}: "
   IFS= read -r value </dev/tty || die "Unable to read from the terminal."
   value="$(trim "$value")"
   if [ -z "$value" ]; then
@@ -138,7 +146,7 @@ prompt_with_default() {
 prompt_optional() {
   local prompt="$1"
   local value=""
-  tty_print "$prompt"
+  tty_print "${COLOR_BOLD}$prompt${COLOR_RESET}"
   IFS= read -r value </dev/tty || die "Unable to read from the terminal."
   printf "%s" "$(trim "$value")"
 }
@@ -154,7 +162,7 @@ confirm() {
   fi
 
   while true; do
-    tty_print "$prompt $suffix "
+    tty_print "${COLOR_BOLD}$prompt${COLOR_RESET} $suffix "
     IFS= read -r answer </dev/tty || die "Unable to read from the terminal."
     answer="$(trim "$answer")"
 
@@ -291,7 +299,7 @@ pick_candidate_or_manual() {
   tty_println "s. Skip"
 
   while true; do
-    tty_print "Choose a value: "
+    tty_print "${COLOR_BOLD}Choose a value${COLOR_RESET}: "
     IFS= read -r choice </dev/tty || die "Unable to read from the terminal."
     choice="$(trim "$choice")"
 
@@ -401,6 +409,9 @@ detect_project_values() {
   local -a project_candidates=()
   local -a plist_candidates=()
 
+  section "Project detection"
+  progress "Scanning the repository for Xcode projects, workspaces, Info.plist files, and version metadata..."
+
   while IFS= read -r path; do
     append_choice workspace_candidates "$path"
   done < <(find . \
@@ -419,7 +430,6 @@ detect_project_values() {
     \( -path './.git' -o -path './Pods' -o -path './build' -o -path './.build' -o -path './node_modules' \) -prune \
     -o -type f -name 'Info.plist' -print 2>/dev/null | sed 's|^\./||' | sort)
 
-  section "Project detection"
   tty_println "The next values are optional. You can use a detected value, enter your own, or skip each one."
 
   if [ "${#workspace_candidates[@]}" -gt 0 ]; then
@@ -519,11 +529,13 @@ set_variable() {
 configure_github() {
   section "Configuring GitHub"
   tty_println "Configuring GitHub Actions secrets and variables for $REPO_SLUG"
+  progress "Saving repository secrets..."
 
   set_secret "APPSTORE_KEY_ID" "$APPSTORE_KEY_ID"
   set_secret "APPSTORE_ISSUER_ID" "$APPSTORE_ISSUER_ID"
   set_secret "APPSTORE_PRIVATE_KEY" "$PRIVATE_KEY_CONTENT"
 
+  progress "Saving repository variables..."
   set_variable "XCODE_CLOUD_WORKFLOW_ID" "$XCODE_CLOUD_WORKFLOW_ID"
 
   if [ -n "$XCODE_CLOUD_PROJECT_PATH" ]; then
@@ -546,6 +558,8 @@ configure_github() {
 }
 
 generate_workflow() {
+  section "Generating workflow"
+  progress "Writing $WORKFLOW_PATH..."
   mkdir -p "$(dirname "$WORKFLOW_PATH")"
 
   cat > "$WORKFLOW_PATH" <<EOF
@@ -683,6 +697,7 @@ EOF
 maybe_create_branch() {
   local branch_name=""
 
+  section "Git workflow: branch"
   if ! confirm "Create a new branch for $WORKFLOW_PATH?" "y"; then
     return 0
   fi
@@ -710,22 +725,26 @@ maybe_create_branch() {
   git switch -c "$branch_name" >/dev/null 2>&1 || git checkout -b "$branch_name"
   CURRENT_BRANCH="$branch_name"
   CREATED_BRANCH="yes"
+  success "Using branch $branch_name."
 }
 
 maybe_commit_changes() {
   local commit_message=""
 
+  section "Git workflow: commit"
   if ! confirm "Commit $WORKFLOW_PATH?" "y"; then
     return 0
   fi
 
   commit_message="$(prompt_with_default "Commit message" "$DEFAULT_COMMIT_MESSAGE")"
+  progress "Creating commit..."
   git add "$WORKFLOW_PATH"
   git commit -m "$commit_message"
   COMMITTED_CHANGES="yes"
 }
 
 maybe_push_branch() {
+  section "Git workflow: push"
   if ! confirm "Push the current branch to origin?" "y"; then
     return 0
   fi
@@ -734,6 +753,7 @@ maybe_push_branch() {
     die "Cannot push from a detached HEAD."
   fi
 
+  progress "Pushing branch to origin..."
   git push -u origin "$CURRENT_BRANCH"
   PUSHED_BRANCH="yes"
 }
@@ -742,6 +762,7 @@ maybe_open_pr() {
   local pr_title=""
   local pr_body=""
 
+  section "Git workflow: pull request"
   if ! confirm "Open a pull request in $REPO_SLUG?" "n"; then
     return 0
   fi
@@ -765,6 +786,7 @@ maybe_open_pr() {
 
   pr_title="$(prompt_with_default "Pull request title" "$DEFAULT_PR_TITLE")"
   pr_body="$(prompt_with_default "Pull request body" "$DEFAULT_PR_BODY")"
+  progress "Opening pull request..."
   PR_URL="$(gh pr create --repo "$REPO_SLUG" --base "$DEFAULT_BRANCH" --head "$CURRENT_BRANCH" --title "$pr_title" --body "$pr_body")"
   OPENED_PR="yes"
 }
