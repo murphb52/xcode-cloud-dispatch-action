@@ -40,6 +40,29 @@ XCODE_CLOUD_INFO_PLIST_PATH=""
 DETECTED_BUNDLE_ID=""
 DETECTED_MARKETING_VERSION=""
 DETECTED_WORKSPACE_PATH=""
+USE_COLOR=0
+COLOR_RESET=""
+COLOR_BOLD=""
+COLOR_DIM=""
+COLOR_BLUE=""
+COLOR_GREEN=""
+COLOR_YELLOW=""
+COLOR_RED=""
+COLOR_CYAN=""
+
+setup_colors() {
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    USE_COLOR=1
+    COLOR_RESET="$(printf '\033[0m')"
+    COLOR_BOLD="$(printf '\033[1m')"
+    COLOR_DIM="$(printf '\033[2m')"
+    COLOR_BLUE="$(printf '\033[34m')"
+    COLOR_GREEN="$(printf '\033[32m')"
+    COLOR_YELLOW="$(printf '\033[33m')"
+    COLOR_RED="$(printf '\033[31m')"
+    COLOR_CYAN="$(printf '\033[36m')"
+  fi
+}
 
 tty_print() {
   printf "%s" "$*" >/dev/tty
@@ -49,18 +72,27 @@ tty_println() {
   printf "%s\n" "$*" >/dev/tty
 }
 
+section() {
+  tty_println ""
+  tty_println "${COLOR_BOLD}${COLOR_BLUE}== $* ==${COLOR_RESET}"
+}
+
+success() {
+  tty_println "${COLOR_GREEN}$*${COLOR_RESET}"
+}
+
 die() {
   tty_println ""
-  tty_println "Error: $*"
+  tty_println "${COLOR_RED}${COLOR_BOLD}Error:${COLOR_RESET} ${COLOR_RED}$*${COLOR_RESET}"
   exit 1
 }
 
 info() {
-  tty_println "$*"
+  tty_println "${COLOR_CYAN}$*${COLOR_RESET}"
 }
 
 warn() {
-  tty_println "Warning: $*"
+  tty_println "${COLOR_YELLOW}${COLOR_BOLD}Warning:${COLOR_RESET} ${COLOR_YELLOW}$*${COLOR_RESET}"
 }
 
 command_exists() {
@@ -194,8 +226,7 @@ read_private_key_from_file() {
 prompt_private_key() {
   local method=""
 
-  tty_println ""
-  tty_println "App Store Connect private key"
+  section "App Store Connect private key"
   tty_println "Where to get it:"
   tty_println "- App Store Connect API help: $ASC_API_HELP_URL"
   tty_println "- API key details: $ASC_API_KEYS_URL"
@@ -279,8 +310,7 @@ pick_candidate_or_manual() {
 }
 
 show_intro() {
-  tty_println "Xcode Cloud Dispatch installer"
-  tty_println ""
+  section "Xcode Cloud Dispatch installer"
   tty_println "This script will:"
   tty_println "- verify Git and GitHub CLI access"
   tty_println "- collect required App Store Connect and Xcode Cloud values"
@@ -383,8 +413,7 @@ detect_project_values() {
     \( -path './.git' -o -path './Pods' -o -path './build' -o -path './.build' -o -path './node_modules' \) -prune \
     -o -type f -name 'Info.plist' -print 2>/dev/null | sed 's|^\./||' | sort)
 
-  tty_println ""
-  tty_println "Project detection"
+  section "Project detection"
   tty_println "The next values are optional. You can use a detected value, enter your own, or skip each one."
 
   if [ "${#workspace_candidates[@]}" -gt 0 ]; then
@@ -429,9 +458,7 @@ detect_project_values() {
 }
 
 prompt_required_values() {
-  tty_println ""
-  tty_println "Required values"
-  tty_println ""
+  section "Required values"
   tty_println "APPSTORE_KEY_ID"
   tty_println "- What it is: the App Store Connect API key ID."
   tty_println "- Where to get it: $ASC_API_KEYS_URL"
@@ -456,9 +483,7 @@ prompt_required_values() {
 }
 
 prompt_optional_values() {
-  tty_println ""
-  tty_println "Optional values"
-  tty_println ""
+  section "Optional values"
   tty_println "APPSTORE_TEAM_ID"
   tty_println "- Optional. Used to generate a direct App Store Connect build URL."
   tty_println "- Often visible in App Store Connect URLs after /teams/."
@@ -486,7 +511,7 @@ set_variable() {
 }
 
 configure_github() {
-  tty_println ""
+  section "Configuring GitHub"
   tty_println "Configuring GitHub Actions secrets and variables for $REPO_SLUG"
 
   set_secret "APPSTORE_KEY_ID" "$APPSTORE_KEY_ID"
@@ -510,6 +535,8 @@ configure_github() {
   if [ -n "$APPSTORE_APP_ID" ]; then
     set_variable "APPSTORE_APP_ID" "$APPSTORE_APP_ID"
   fi
+
+  success "GitHub Actions secrets and variables configured."
 }
 
 generate_workflow() {
@@ -737,8 +764,7 @@ maybe_open_pr() {
 }
 
 print_summary() {
-  tty_println ""
-  tty_println "Installation summary"
+  section "Installation summary"
   tty_println "- Repository: $REPO_SLUG"
   tty_println "- Repository URL: $REPO_URL"
   tty_println "- Default branch: $DEFAULT_BRANCH"
@@ -784,12 +810,13 @@ print_summary() {
   fi
 
   tty_println ""
-  tty_println "Secrets were stored in GitHub Actions secrets only."
-  tty_println "The App Store Connect private key was kept in memory and was not written to disk."
-  tty_println "After the workflow is merged into the repository default branch, comment /build on a pull request to trigger Xcode Cloud."
+  success "Secrets were stored in GitHub Actions secrets only."
+  tty_println "${COLOR_DIM}The App Store Connect private key was kept in memory and was not written to disk.${COLOR_RESET}"
+  tty_println "${COLOR_BOLD}After the workflow is merged into the repository default branch, comment /build on a pull request to trigger Xcode Cloud.${COLOR_RESET}"
 }
 
 main() {
+  setup_colors
   show_intro
   preflight_checks
   detect_project_values
