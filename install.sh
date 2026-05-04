@@ -250,24 +250,28 @@ prompt_private_key() {
 }
 
 append_choice() {
-  local -n target_array="$1"
+  local target_array_name="$1"
   local candidate="$2"
   if [ -n "$candidate" ]; then
-    target_array+=("$candidate")
+    eval "$target_array_name+=(\"\$candidate\")"
   fi
 }
 
 pick_candidate_or_manual() {
   local label="$1"
   local manual_prompt="$2"
-  local -n candidates_ref="$3"
+  local candidates_array_name="$3"
   local choice=""
   local idx=1
+  local candidate_count=0
+  local selected_value=""
+
+  eval "candidate_count=\${#$candidates_array_name[@]}"
 
   tty_println ""
   tty_println "$label is optional."
 
-  if [ "${#candidates_ref[@]}" -eq 0 ]; then
+  if [ "$candidate_count" -eq 0 ]; then
     tty_println "No detected values were found."
     if confirm "Enter a value manually?" "n"; then
       printf "%s" "$(prompt_line "$manual_prompt")"
@@ -278,8 +282,9 @@ pick_candidate_or_manual() {
   fi
 
   tty_println "Detected candidates:"
-  for candidate in "${candidates_ref[@]}"; do
-    tty_println "$idx. $candidate"
+  while [ "$idx" -le "$candidate_count" ]; do
+    eval "selected_value=\${$candidates_array_name[$((idx - 1))]}"
+    tty_println "$idx. $selected_value"
     idx=$((idx + 1))
   done
   tty_println "m. Enter a value manually"
@@ -300,8 +305,9 @@ pick_candidate_or_manual() {
       return 0
     fi
 
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#candidates_ref[@]}" ]; then
-      printf "%s" "${candidates_ref[$((choice - 1))]}"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$candidate_count" ]; then
+      eval "selected_value=\${$candidates_array_name[$((choice - 1))]}"
+      printf "%s" "$selected_value"
       return 0
     fi
 
