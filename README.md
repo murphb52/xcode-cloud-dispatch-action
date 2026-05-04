@@ -56,7 +56,7 @@ The installer configures:
   - `APPSTORE_APP_ID`, if provided
 - A PR comment workflow at `.github/workflows/xcode-cloud-dispatch.yml`
 
-The generated workflow listens for `/build` comments on pull requests, rejects forked PRs with a clear explanation, checks out the pull request head commit, dispatches Xcode Cloud, and updates the original comment with either the build details or a failure link to the Actions logs.
+The generated workflow listens for `/build` comments on pull requests, rejects forked PRs with a clear explanation, checks out the pull request head commit, dispatches Xcode Cloud, and posts a follow-up PR comment with either the build details or a failure link to the Actions logs.
 
 ## Required Values
 
@@ -107,7 +107,7 @@ Once the workflow is merged into the repository default branch, comment:
 /build
 ```
 
-on a pull request in the repository. The workflow will trigger this action, and the original comment will be updated with the result.
+on a pull request in the repository. The workflow will trigger this action and post a follow-up comment with the result.
 
 ## Fork Limitation
 
@@ -116,6 +116,10 @@ The generated workflow rejects pull requests from forks. Xcode Cloud dispatch ex
 ## Secret Handling
 
 The installer stores sensitive values only in GitHub Actions secrets. It does not write the App Store Connect private key to disk. If you choose the file-based input path, the script reads the `.p8` file into memory and passes it directly to `gh secret set`.
+
+## GitHub Comment Behavior
+
+The generated workflow posts a new PR comment for success, failure, or fork rejection. GitHub Actions can create issue comments with `GITHUB_TOKEN`, but it can't edit a comment written by a human user, so the workflow does not try to modify the original `/build` comment.
 
 ## Manual Setup
 
@@ -163,13 +167,11 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.issues.updateComment({
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
+              issue_number: context.issue.number,
               body: [
-                '/build',
-                '',
                 '> Xcode Cloud dispatch only supports pull requests whose head branch exists in the repository linked to the Xcode Cloud workflow.',
                 '> Pull requests from forks are not supported by this workflow.',
               ].join('\n'),

@@ -607,16 +607,14 @@ jobs:
         with:
           script: |
             const body = [
-              '/build',
-              '',
               '> Xcode Cloud dispatch only supports pull requests whose head branch exists in the repository linked to the Xcode Cloud workflow.',
               '> Pull requests from forks are not supported by this workflow.',
             ].join('\\n');
 
-            await github.rest.issues.updateComment({
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
+              issue_number: context.issue.number,
               body,
             });
 
@@ -665,10 +663,10 @@ jobs:
             lines.push(\`> Build number: \\\`\${process.env.BUILD_NUMBER}\\\`\`);
             lines.push(\`> Build URL: \${process.env.BUILD_URL}\`);
 
-            await github.rest.issues.updateComment({
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
+              issue_number: context.issue.number,
               body: lines.join('\\n'),
             });
 
@@ -679,16 +677,14 @@ jobs:
           script: |
             const runUrl = \`\${context.serverUrl}/\${context.repo.owner}/\${context.repo.repo}/actions/runs/\${context.runId}\`;
             const body = [
-              '/build',
-              '',
               '> Xcode Cloud dispatch failed.',
               \`> Review the GitHub Actions logs: \${runUrl}\`,
             ].join('\\n');
 
-            await github.rest.issues.updateComment({
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
+              issue_number: context.issue.number,
               body,
             });
 EOF
