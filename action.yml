@@ -16,11 +16,11 @@ inputs:
     description: 'The Xcode Cloud Workflow ID'
     required: true
   project_path:
-    description: 'Optional: Path to .xcodeproj (e.g. "ios/Runner.xcodeproj").'
+    description: 'Optional: Path to .xcodeproj (e.g. "ios/Runner.xcodeproj"). Used to read MARKETING_VERSION from project.pbxproj. Auto-detected when omitted.'
     required: false
     default: ''
   info_plist_path:
-    description: 'Optional: Path to Info.plist. Use for projects with a hardcoded CFBundleShortVersionString.'
+    description: 'Optional: Path to Info.plist with a hardcoded CFBundleShortVersionString. Ignored when the value is a build-setting reference such as $(MARKETING_VERSION).'
     required: false
     default: ''
   branch:
@@ -44,40 +44,66 @@ outputs:
     description: 'The deep-link to the build summary'
     value: ${{ steps.xcode_cloud.outputs.build_url }}
   marketing_version:
-    description: 'The auto-detected marketing version'
+    description: 'The auto-detected marketing version (empty if it could not be detected)'
     value: ${{ steps.meta.outputs.marketing_version }}
 
 runs:
   using: 'composite'
   steps:
+    - name: 'Validate Inputs'
+      shell: bash
+      run: |
+        missing=0
+        require() {
+          if [ -z "$2" ]; then
+            echo "::error::Input '$1' is empty. $3"
+            missing=1
+          fi
+        }
+
+        secrets_hint="Check that the repository secret exists and is passed to the action. Secrets are not available to workflows triggered from forks."
+        require apple_key_id "$APPLE_KEY_ID" "Set the APPSTORE_KEY_ID secret. $secrets_hint"
+        require apple_issuer_id "$APPLE_ISSUER_ID" "Set the APPSTORE_ISSUER_ID secret. $secrets_hint"
+        require apple_private_key "$APPLE_PRIVATE_KEY" "Set the APPSTORE_PRIVATE_KEY secret to the contents of the .p8 file. $secrets_hint"
+        require workflow_id "$WORKFLOW_ID" "Set the XCODE_CLOUD_WORKFLOW_ID repository variable (Settings > Secrets and variables > Actions > Variables) to your Xcode Cloud workflow ID."
+
+        if [ -n "$APPLE_PRIVATE_KEY" ] && ! printf '%s' "$APPLE_PRIVATE_KEY" | grep -q 'PRIVATE KEY'; then
+          echo "::error::Input 'apple_private_key' does not look like a .p8 key. Paste the full file contents, including the BEGIN/END PRIVATE KEY lines."
+          missing=1
+        fi
+
+        exit "$missing"
+      env:
+        APPLE_KEY_ID: ${{ inputs.apple_key_id }}
+        APPLE_ISSUER_ID: ${{ inputs.apple_issuer_id }}
+        APPLE_PRIVATE_KEY: ${{ inputs.apple_private_key }}
+        WORKFLOW_ID: ${{ inputs.workflow_id }}
+
     - name: 'Determine Marketing Version'
       id: 'meta'
       shell: bash
       run: |
-        # 1. Resolve Project Path
-        PATH_TO_PROJECT="${{ inputs.project_path }}"
-        if [ -z "$PATH_TO_PROJECT" ]; then
-          PATH_TO_PROJECT=$(find . -maxdepth 2 -name "*.xcodeproj" -print -quit)
-        fi
-
-        # 2. Extract Version (Flutter -> Info.plist -> project.pbxproj)
-        if [ -f "pubspec.yaml" ]; then
-          VERSION=$(grep '^version: ' pubspec.yaml | sed 's/^version: //' | cut -d'+' -f1 | tr -d '[:space:]')
-        elif [ -n "${{ inputs.info_plist_path }}" ]; then
-          VERSION=$(python3 -c "import plistlib; d=plistlib.load(open('${{ inputs.info_plist_path }}','rb')); print(d.get('CFBundleShortVersionString',''))" 2>/dev/null)
-        elif [ -n "$PATH_TO_PROJECT" ] && [ -f "$PATH_TO_PROJECT/project.pbxproj" ]; then
-          VERSION=$(grep 'MARKETING_VERSION' "$PATH_TO_PROJECT/project.pbxproj" \
-            | grep -v '^\s*//' | tail -1 | cut -d'=' -f2 | tr -d ';"[:space:]')
-        fi
-
-        echo "marketing_version=${VERSION:-}" >> "$GITHUB_OUTPUT"
+        # Detection is informational: it must never stop a build from being dispatched.
+        VERSION=$(python3 "${{ github.action_path }}/detect_marketing_version.py" || true)
+        echo "Detected marketing version: ${VERSION:-<none>}"
+        echo "marketing_version=${VERSION}" >> "$GITHUB_OUTPUT"
+      env:
+        PROJECT_PATH: ${{ inputs.project_path }}
+        INFO_PLIST_PATH: ${{ inputs.info_plist_path }}
 
     - name: 'Generate JWT'
       id: 'jwt'
       shell: bash
       run: |
-        pip install PyJWT cryptography --quiet
-        TOKEN=$(python3 ${{ github.action_path }}/gen_jwt.py)
+        if ! pip install PyJWT cryptography --quiet; then
+          echo "::error::Could not install PyJWT/cryptography with pip."
+          exit 1
+        fi
+        if ! TOKEN=$(python3 "${{ github.action_path }}/gen_jwt.py"); then
+          echo "::error::Could not generate an App Store Connect token. Check that apple_private_key is the full contents of a valid .p8 key."
+          exit 1
+        fi
+        echo "::add-mask::$TOKEN"
         echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
       env:
         KEY_ID: ${{ inputs.apple_key_id }}
@@ -88,82 +114,95 @@ runs:
       id: 'xcode_cloud'
       shell: bash
       run: |
-        AUTH="Authorization: Bearer ${{ steps.jwt.outputs.token }}"
+        API="https://api.appstoreconnect.apple.com/v1"
 
-        # Resolve git reference ID if a branch/tag was specified
-        GIT_REF_RELATIONSHIP=""
-        if [ -n "${{ inputs.branch }}" ]; then
-          REPO_ID=$(curl -s \
-            -H "$AUTH" \
-            "https://api.appstoreconnect.apple.com/v1/ciWorkflows/${{ inputs.workflow_id }}/repository" \
-            | jq -r '.data.id // ""')
+        # Sets HTTP_STATUS and RESPONSE_BODY. HTTP_STATUS is 000 if the request never completed.
+        api_request() {
+          local method="$1" url="$2" body="${3:-}"
+          local response_file
+          response_file=$(mktemp)
+          local args=(-sS -o "$response_file" -w '%{http_code}' -X "$method" -H "Authorization: Bearer ${TOKEN}")
+          if [ -n "$body" ]; then
+            args+=(-H 'Content-Type: application/json' -d "$body")
+          fi
+          HTTP_STATUS=$(curl "${args[@]}" "$url") || HTTP_STATUS="000"
+          RESPONSE_BODY=$(cat "$response_file")
+          rm -f "$response_file"
+        }
 
+        fail_with_api_error() {
+          local action="$1"
+          local detail
+          detail=$(echo "$RESPONSE_BODY" | jq -r '[.errors[]? | "\(.title): \(.detail)"] | join("; ")' 2>/dev/null || true)
+          local hint
+          case "$HTTP_STATUS" in
+            000) hint="The request to App Store Connect did not complete. Check network access and retry." ;;
+            401) hint="App Store Connect rejected the credentials. Check apple_key_id, apple_issuer_id and apple_private_key belong to the same API key." ;;
+            403) hint="The API key is not allowed to do this. It needs a role with Xcode Cloud access (for example App Manager or Admin)." ;;
+            404) hint="Not found. Check that workflow_id is a valid Xcode Cloud workflow ID that this API key can see." ;;
+            *)   hint="Unexpected response from App Store Connect." ;;
+          esac
+          echo "::error::${action} failed (HTTP ${HTTP_STATUS}). ${hint}${detail:+ Apple said: ${detail}}"
+          exit 1
+        }
+
+        GIT_REF_ID=""
+        if [ -n "$BRANCH" ]; then
+          api_request GET "${API}/ciWorkflows/${WORKFLOW_ID}/repository"
+          [ "$HTTP_STATUS" = "200" ] || fail_with_api_error "Looking up the repository for workflow ${WORKFLOW_ID}"
+          REPO_ID=$(echo "$RESPONSE_BODY" | jq -r '.data.id // ""')
           if [ -z "$REPO_ID" ]; then
-            echo "::error::Could not resolve repository for workflow ${{ inputs.workflow_id }}"
+            echo "::error::Workflow ${WORKFLOW_ID} has no repository linked in Xcode Cloud."
             exit 1
           fi
 
-          echo "Searching for branch '${{ inputs.branch }}'..."
-          GIT_REF_ID=""
-          NEXT_URL="https://api.appstoreconnect.apple.com/v1/scmRepositories/${REPO_ID}/gitReferences?limit=200"
+          echo "Searching for branch '${BRANCH}'..."
+          NEXT_URL="${API}/scmRepositories/${REPO_ID}/gitReferences?limit=200"
           PAGE=1
           while [ -n "$NEXT_URL" ] && [ -z "$GIT_REF_ID" ]; do
             echo "Fetching git references page ${PAGE}..."
-            REFS_RESPONSE=$(curl -s -H "$AUTH" "$NEXT_URL")
-            GIT_REF_ID=$(echo "$REFS_RESPONSE" \
-              | jq -r --arg name "${{ inputs.branch }}" '.data[]? | select(.attributes.kind == "BRANCH" and .attributes.name == $name) | .id' \
-              | head -1)
-            NEXT_URL=$(echo "$REFS_RESPONSE" | jq -r '.links.next // ""')
+            api_request GET "$NEXT_URL"
+            [ "$HTTP_STATUS" = "200" ] || fail_with_api_error "Listing branches"
+            GIT_REF_ID=$(echo "$RESPONSE_BODY" \
+              | jq -r --arg name "$BRANCH" '[.data[]? | select(.attributes.kind == "BRANCH" and .attributes.name == $name) | .id] | first // ""')
+            NEXT_URL=$(echo "$RESPONSE_BODY" | jq -r '.links.next // ""')
             PAGE=$((PAGE + 1))
           done
 
           if [ -z "$GIT_REF_ID" ]; then
-            echo "::error::Could not find branch '${{ inputs.branch }}' in repository"
+            echo "::error::Could not find branch '${BRANCH}' in the repository linked to Xcode Cloud workflow ${WORKFLOW_ID}. Make sure the branch is pushed to that repository (forks are not supported), or leave 'branch' empty to build the workflow's default branch."
             exit 1
           fi
-          echo "Found branch '${{ inputs.branch }}' with ID: ${GIT_REF_ID}"
-
-          GIT_REF_RELATIONSHIP=', "sourceBranchOrTag": { "data": { "type": "scmGitReferences", "id": "'"$GIT_REF_ID"'" } }'
+          echo "Found branch '${BRANCH}' with ID: ${GIT_REF_ID}"
         fi
 
-        echo "::group::Xcode Cloud API Request"
-        RESPONSE=$(curl -s -i -X POST "https://api.appstoreconnect.apple.com/v1/ciBuildRuns" \
-          -H "$AUTH" \
-          -H "Content-Type: application/json" \
-          -d "{
-            \"data\": {
-              \"type\": \"ciBuildRuns\",
-              \"relationships\": {
-                \"workflow\": { \"data\": { \"type\": \"ciWorkflows\", \"id\": \"${{ inputs.workflow_id }}\" } }${GIT_REF_RELATIONSHIP}
-              }
-            }
-          }")
-        echo "::endgroup::"
+        REQUEST_BODY=$(jq -n --arg workflow "$WORKFLOW_ID" --arg ref "$GIT_REF_ID" '
+          {data: {type: "ciBuildRuns", relationships:
+            ({workflow: {data: {type: "ciWorkflows", id: $workflow}}}
+             + (if $ref == "" then {} else {sourceBranchOrTag: {data: {type: "scmGitReferences", id: $ref}}} end))}}')
 
-        # Separate Header and Body for debugging
-        HTTP_STATUS=$(echo "$RESPONSE" | grep HTTP | tail -1 | awk '{print $2}')
-        BODY=$(echo "$RESPONSE" | sed '1,/^\r$/d')
+        api_request POST "${API}/ciBuildRuns" "$REQUEST_BODY"
+        [ "$HTTP_STATUS" = "201" ] || fail_with_api_error "Starting the Xcode Cloud build"
 
-        echo "HTTP Status: $HTTP_STATUS"
-        
-        # Parse values
-        APPLE_BUILD=$(echo "$BODY" | jq -r '.data.attributes.number // "null"')
-        BUILD_ID=$(echo "$BODY" | jq -r '.data.id // "null"')
-
-        if [[ "$APPLE_BUILD" == "null" || "$HTTP_STATUS" -ne 201 ]]; then
-          echo "::error::Xcode Cloud Dispatch Failed!"
-          echo "Full API Response:"
-          echo "$BODY" | jq .
+        APPLE_BUILD=$(echo "$RESPONSE_BODY" | jq -r '.data.attributes.number // ""')
+        BUILD_ID=$(echo "$RESPONSE_BODY" | jq -r '.data.id // ""')
+        if [ -z "$APPLE_BUILD" ]; then
+          echo "::error::Xcode Cloud accepted the request but returned no build number."
+          echo "$RESPONSE_BODY" | jq . 2>/dev/null || echo "$RESPONSE_BODY"
           exit 1
         fi
 
         echo "Successfully triggered Build #$APPLE_BUILD"
         echo "apple_build_number=$APPLE_BUILD" >> "$GITHUB_OUTPUT"
 
-        # URL Logic
-        if [[ -n "${{ inputs.team_id }}" && -n "${{ inputs.app_id }}" ]]; then
-          URL="https://appstoreconnect.apple.com/teams/${{ inputs.team_id }}/apps/${{ inputs.app_id }}/ci/builds/$BUILD_ID/summary"
-          echo "build_url=$URL" >> "$GITHUB_OUTPUT"
+        if [[ -n "$TEAM_ID" && -n "$APP_ID" ]]; then
+          echo "build_url=https://appstoreconnect.apple.com/teams/${TEAM_ID}/apps/${APP_ID}/ci/builds/${BUILD_ID}/summary" >> "$GITHUB_OUTPUT"
         else
           echo "build_url=https://appstoreconnect.apple.com/apps" >> "$GITHUB_OUTPUT"
         fi
+      env:
+        TOKEN: ${{ steps.jwt.outputs.token }}
+        WORKFLOW_ID: ${{ inputs.workflow_id }}
+        BRANCH: ${{ inputs.branch }}
+        TEAM_ID: ${{ inputs.team_id }}
+        APP_ID: ${{ inputs.app_id }}

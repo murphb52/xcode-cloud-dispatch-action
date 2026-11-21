@@ -383,6 +383,13 @@ detect_marketing_version() {
     version="$(grep 'MARKETING_VERSION' "$project_path/project.pbxproj" | grep -v '^[[:space:]]*//' | head -1 | cut -d'=' -f2 | tr -d ';"[:space:]' || true)"
   fi
 
+  if [ -z "$version" ]; then
+    version="$(find . \( -path './.git' -o -path './Pods' -o -path './build' -o -path './.build' -o -path './node_modules' \) -prune \
+      -o -type f -name '*.xcconfig' -print 2>/dev/null | sort \
+      | while IFS= read -r config_path; do grep -E '^[[:space:]]*MARKETING_VERSION[[:space:]]*=' "$config_path" || true; done \
+      | grep -v '\$(' | head -1 | cut -d'=' -f2 | tr -d ';"[:space:]' || true)"
+  fi
+
   printf "%s" "$version"
 }
 

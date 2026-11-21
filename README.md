@@ -88,6 +88,8 @@ You can provide or skip these optional values:
 - `XCODE_CLOUD_INFO_PLIST_PATH`
   Path to an `Info.plist` if your version is hardcoded there.
 
+Both are optional. If neither is set, the action auto-detects the project and falls back to `.xcconfig` files.
+
 Before prompting for the project-related values, the installer tries to detect:
 
 - `.xcodeproj` candidates
@@ -95,7 +97,7 @@ Before prompting for the project-related values, the installer tries to detect:
 - `Info.plist` candidates
 - a bundle identifier from `Info.plist`
 - the marketing version from `pubspec.yaml` for Flutter projects
-- otherwise, `MARKETING_VERSION` from the Xcode project
+- otherwise, `MARKETING_VERSION` from the Xcode project or its `.xcconfig` files
 
 Detected values are suggestions only. The installer asks whether to use one, enter a value manually, or skip it.
 
@@ -208,10 +210,31 @@ jobs:
 | `apple_private_key` | The content of the `.p8` private key file | Yes | - |
 | `workflow_id` | The Xcode Cloud workflow ID from App Store Connect | Yes | - |
 | `project_path` | Path to your `.xcodeproj`. Used to read `MARKETING_VERSION` from `project.pbxproj`. | No | Auto-detected by the action when omitted |
-| `info_plist_path` | Path to your `Info.plist` for hardcoded `CFBundleShortVersionString` projects. | No | - |
+| `info_plist_path` | Path to your `Info.plist` for hardcoded `CFBundleShortVersionString` projects. A build-setting reference such as `$(MARKETING_VERSION)` is skipped. | No | - |
 | `branch` | Branch name to build. If omitted, Xcode Cloud uses the workflow default branch. | No | - |
 | `team_id` | App Store Connect Team ID for deep-linking | No | - |
 | `app_id` | Apple App ID for deep-linking | No | - |
+
+## Marketing Version Detection
+
+Detection is informational and never blocks a build. The action tries, in order:
+
+1. `pubspec.yaml` (Flutter)
+2. `info_plist_path`, when `CFBundleShortVersionString` is a literal version
+3. `MARKETING_VERSION` in `project.pbxproj` (`project_path`, or the first `.xcodeproj` found)
+4. `MARKETING_VERSION` in `*.xcconfig` files (the most common value wins; `Pods`, `build` and similar folders are skipped)
+
+If nothing is found, the action emits a warning, leaves the `marketing_version` output empty and still dispatches the build.
+
+## Failure Messages
+
+Problems that stop a build are reported as `::error::` annotations that say what to fix: empty required inputs (including missing secrets or the `XCODE_CLOUD_WORKFLOW_ID` variable), rejected credentials (401), an API key without Xcode Cloud access (403), an unknown workflow (404), and a branch that Xcode Cloud cannot find.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
 
 ## Outputs
 
